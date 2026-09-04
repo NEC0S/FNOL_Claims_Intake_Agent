@@ -1,20 +1,32 @@
-# FNOL Claims Intake Agent
+# FNOL Claims Intake — Operations Console
 
-**Multi-agent LangGraph pipeline for automated auto-insurance claim intake, triage, and adjudication.**
+**A production multi-agent LangGraph pipeline for automated auto-insurance claim intake, triage, and adjudication — wrapped in a full-stack FastAPI + React operations console.**
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue)]()
 [![LangGraph](https://img.shields.io/badge/orchestration-LangGraph-1c1c1c)]()
+[![FastAPI](https://img.shields.io/badge/backend-FastAPI-009688)]()
+[![React](https://img.shields.io/badge/frontend-React-61DAFB)]()
 [![Supabase](https://img.shields.io/badge/database-Supabase-3ECF8E)]()
+[![Deploy](https://img.shields.io/badge/deploy-Render-46E3B7)]()
 [![Status](https://img.shields.io/badge/build-production-success)]()
 [![License](https://img.shields.io/badge/license-Proprietary-lightgrey)]()
+
+🔗 **Live app:** [fnol-frontend.onrender.com](https://fnol-frontend.onrender.com)
+🎥 **Demo video:** _coming soon_
 
 ---
 
 ## Overview
 
-**FNOL** — *First Notice of Loss* — is the industry term for the moment a policyholder first reports an incident to their insurer. This notebook implements a **production-grade, agentic FNOL intake system**: it watches a real mailbox, reads claim emails as they arrive, and runs each one through a graph of specialist agents that extract the facts, verify the policy, cross-check the weather, screen the language for fraud risk, and either auto-approve or escalate the claim to a human adjuster — with a full, regulator-ready report attached.
+**FNOL** — *First Notice of Loss* — is the industry term for the moment a policyholder first reports an incident to their insurer. This project is a **production-grade, agentic FNOL intake system**: it watches a real mailbox, reads claim emails as they arrive, and runs each one through a graph of specialist agents that extract the facts, verify the policy, cross-check the weather, screen the language for fraud risk, and either auto-approve or escalate the claim to a human adjuster — with a full, regulator-ready report attached.
 
-There is no mock mode. Every node talks to a live system (LLM API, Supabase, IMAP/SMTP, Open-Meteo), and the notebook **fails fast at startup** if a required credential is missing rather than silently degrading to fake data.
+It started as a single production notebook and has since been rebuilt into a deployable application:
+
+- **FastAPI backend** with JWT auth (admin / manager / checker roles), Supabase (Postgres) persistence, IMAP polling control, and a read-only SQL query tool.
+- **React frontend** (manager + checker console): dashboard, claims list & detail, manual claim submission, policy management, inbox poller controls, a SQL query page, and a Settings page for API keys / SMTP / IMAP — editable at runtime, no redeploy needed.
+- **Docker** for both services, running via `docker-compose` locally or on **Render** in production.
+
+There is no mock mode. Every node talks to a live system (LLM API, Supabase, IMAP/SMTP, Open-Meteo).
 
 | Piece | Backing system |
 |---|---|
@@ -23,6 +35,8 @@ There is no mock mode. Every node talks to a live system (LLM API, Supabase, IMA
 | Inbound claim emails | Real IMAP mailbox (unread-message polling) |
 | Outbound follow-up emails | Real SMTP send |
 | Weather corroboration | Open-Meteo geocoding + historical archive API |
+| Auth / roles | JWT, admin / manager / checker |
+| Ops UI | React console (dashboard, claims, policies, poller, SQL tool, users) |
 
 ---
 
@@ -33,30 +47,39 @@ There is no mock mode. Every node talks to a live system (LLM API, Supabase, IMA
 3. [Claim Lifecycle](#claim-lifecycle)
 4. [Decision Logic](#decision-logic)
 5. [Data Model](#data-model)
-6. [Project Structure](#project-structure)
-7. [Getting Started](#getting-started)
-8. [Configuration Reference](#configuration-reference)
-9. [Running the System](#running-the-system)
-10. [Manager Dashboard](#manager-dashboard)
-11. [Duplicate & Supersession Handling](#duplicate--supersession-handling)
-12. [Reliability & Failure Handling](#reliability--failure-handling)
-13. [Production Deployment Notes](#production-deployment-notes)
-14. [Security Considerations](#security-considerations)
+6. [Feature List](#feature-list)
+7. [One-Time Setup](#one-time-setup)
+8. [Run Locally with Docker Compose](#run-locally-with-docker-compose)
+9. [Run Locally Without Docker](#run-locally-without-docker-dev-mode)
+10. [Deploy to Render](#deploy-to-render)
+11. [Project Structure](#project-structure)
+12. [Duplicate & Supersession Handling](#duplicate--supersession-handling)
+13. [Reliability & Failure Handling](#reliability--failure-handling)
+14. [Security Notes](#security-notes)
 
 ---
 
 ## Architecture
 
-The system is a closed loop: an IMAP poller feeds raw emails into a compiled LangGraph state machine, which fans out to external services (LLM, Supabase, Open-Meteo, SMTP) and writes its final, structured decision back to Postgres for a manager dashboard to consume.
+The system is a closed loop: an IMAP poller feeds raw emails into a compiled LangGraph state machine, which fans out to external services (LLM, Supabase, Open-Meteo, SMTP) and writes its final, structured decision back to Postgres. The FastAPI backend exposes that same graph over a REST API, and the React console consumes it for manual claims, review, and dashboards.
 
 ```mermaid
 flowchart LR
     subgraph Inbox["Mailbox"]
-        IMAP["IMAP Poller\nfetch_new_claim_emails()"]
+        IMAP["IMAP Poller\n(APScheduler background job)"]
     end
 
-    subgraph Core["LangGraph Orchestration Core"]
+    subgraph API["FastAPI Backend"]
+        ROUTERS["Routers\nauth · claims · dashboard\nsettings · sql · poller · policies"]
         GRAPH["Claims Intake Graph\n(build_graph)"]
+    end
+
+    subgraph UI["React Console"]
+        DASH["Dashboard"]
+        CLAIMS["Claims list & detail"]
+        POLICIES["Policies"]
+        SETTINGS["Settings"]
+        SQLPAGE["SQL query tool"]
     end
 
     subgraph External["External Systems"]
@@ -66,14 +89,12 @@ flowchart LR
     end
 
     subgraph Storage["Supabase (Postgres)"]
-        DB[("customers · policies · claims")]
-    end
-
-    subgraph Ops["Operations"]
-        DASH["Manager Dashboard\nprint_manager_dashboard()"]
+        DB[("customers · policies · claims\napp_settings · users")]
     end
 
     IMAP -->|unread claim / reply emails| GRAPH
+    UI -->|JWT-authenticated requests| ROUTERS
+    ROUTERS --> GRAPH
     GRAPH -->|structured extraction, risk, report| LLM
     LLM --> GRAPH
     GRAPH -->|geocode + historical check| WEATHER
@@ -82,19 +103,24 @@ flowchart LR
     DB --> GRAPH
     GRAPH -->|persist claim record| DB
     GRAPH -->|send follow-up ask| SMTP
-    DB --> DASH
+    DB --> ROUTERS
+    ROUTERS --> DASH
+    ROUTERS --> CLAIMS
+    ROUTERS --> POLICIES
+    ROUTERS --> SETTINGS
+    ROUTERS --> SQLPAGE
 ```
 
 ---
 
 ## Agent Roster
 
-The graph is composed of five LLM-backed agents and three deterministic (hardcoded, non-AI) nodes. Keeping policy math, coverage windows, and approval thresholds **out of the LLM's hands** is a deliberate design choice — those decisions must be auditable and reproducible.
+The graph is composed of five LLM-backed agents and three deterministic (hardcoded, non-AI) nodes, defined in `backend/app/graph/nodes.py`. Keeping policy math, coverage windows, and approval thresholds **out of the LLM's hands** is a deliberate design choice — those decisions must be auditable and reproducible.
 
 | # | Node | Type | Responsibility |
 |---|---|---|---|
 | 1 | `extraction_agent` | 🤖 LLM | Parses the raw claim email into structured JSON: policy number, incident date, location, description, fault claimed, damage type. |
-| — | `completeness_gate` | ⚙️ Deterministic | Checks the extracted claim against `REQUIRED_CLAIM_FIELDS`; routes to follow-up if anything is missing. |
+| — | `completeness_gate` | ⚙️ Deterministic | Checks the extracted claim against required fields; routes to follow-up if anything is missing. |
 | 2 | `followup_agent` | 🤖 LLM | Drafts and sends a targeted "please send more details" email. Bails out to `needs_manual_followup` after `MAX_FOLLOWUP_ATTEMPTS`. |
 | — | `policy_checks_node` | ⚙️ Deterministic | Looks up the policy in Supabase, checks the coverage window, searches for prior claims on the same policy + incident date, calculates payout. |
 | 3 | `weather_agent` | 🤖 Tool-calling | Geocodes the claimed location and cross-checks the claimed damage type against real historical weather for that date. |
@@ -106,11 +132,11 @@ The graph is composed of five LLM-backed agents and three deterministic (hardcod
 
 ## Claim Lifecycle
 
-Every claim moves through the same compiled graph, with two exit ramps: **incomplete claims** stop for a human-facing follow-up email, and **claims tied to an unknown policy** are rejected outright. Everything else runs the full specialist gauntlet before reaching a decision.
+Every claim moves through the same compiled graph, whether it arrives by email or is submitted manually from the **New Claim** page. There are two exit ramps: **incomplete claims** stop for a human-facing follow-up email, and **claims tied to an unknown policy** are rejected outright. Everything else runs the full specialist gauntlet before reaching a decision.
 
 ```mermaid
 flowchart TD
-    START([New / Replied Email]) --> EXTRACT["Agent 1 — Extraction\n(free text → structured JSON)"]
+    START([New Email / Manual Submit / Reply]) --> EXTRACT["Agent 1 — Extraction\n(free text → structured JSON)"]
     EXTRACT --> GATE{Completeness Gate}
 
     GATE -->|missing fields| FOLLOWUP["Agent 2 — Follow-up Drafter\n(send targeted ask)"]
@@ -126,8 +152,8 @@ flowchart TD
     DECIDE -->|auto_approve| REPORT["Agent 5 — Adjudicator\n(regulator-ready report)"]
     DECIDE -->|escalate_to_manager| REPORT
 
-    REPORT --> PERSIST[("Persist to Supabase\n+ mark superseded priors")]
-    PERSIST --> DONE([Done])
+    REPORT --> PERSIST[("Persist to Supabase\n+ mark superseded priors\n+ log activity timeline")]
+    PERSIST --> DONE([Visible in Console])
 ```
 
 ---
@@ -151,19 +177,20 @@ flowchart LR
     E -.->|all clear| G
 ```
 
-If a claim escalates, **every** triggering reason is recorded in `decision.reasons` — not just the first one hit — so a human reviewer sees the complete picture in one read.
+If a claim escalates, **every** triggering reason is recorded in `decision.reasons` — not just the first one hit — so a reviewer in the console sees the complete picture in one read.
 
 ---
 
 ## Data Model
 
-Three tables in Supabase / Postgres back the entire system. There is no in-memory fallback anywhere in the codebase — every read and write goes through these tables.
+The claims pipeline runs on the same core tables as the original notebook, extended with the app's own auth and settings tables. Everything lives in Supabase / Postgres — there is no in-memory fallback.
 
 ```mermaid
 erDiagram
     CUSTOMERS ||--o{ POLICIES : holds
     POLICIES ||--o{ CLAIMS : "filed against"
     CLAIMS }o--o| CLAIMS : supersedes
+    USERS ||--o{ CLAIMS : reviews
 
     CUSTOMERS {
         text email PK
@@ -202,168 +229,167 @@ erDiagram
         integer followup_count
         timestamptz created_at
     }
+    USERS {
+        text email PK
+        text password_hash
+        text role
+        boolean active
+    }
+    APP_SETTINGS {
+        text key PK
+        text value_encrypted
+    }
 ```
 
-Run the schema once via **Supabase → Project → SQL Editor → New query** before first use — the notebook only ever reads and writes rows; it never provisions tables or seeds sample data.
+Run `backend/app/schema.sql` once via **Supabase → Project → SQL Editor → New query**, or let the backend apply it automatically on first boot if `DATABASE_URL` is set.
+
+---
+
+## Feature List
+
+- **Multi-agent pipeline**: identical logic to the original notebook (extraction, completeness gate, automated follow-up emails with a retry cap, policy lookup, coverage-window check, duplicate/prior-claim detection, weather cross-check via Open-Meteo, LLM fraud-language risk scoring, hardcoded decision thresholds, LLM-written adjudicator report).
+- **Runtime-editable Settings page**: enter your own Google/LLM API key, SMTP credentials, and IMAP credentials from the UI. Anything left blank falls back to the backend's `.env` values automatically — no code changes or redeploys needed either way. Secrets are encrypted at rest.
+- **Manager dashboard**: three buckets (waiting on customer / escalated to you / auto-approved) plus charts (claims by status, by damage type, total approved payout, duplicate count).
+- **Claims list & detail**: search/filter, full automated-check breakdown (coverage window, weather match, risk score), decision reasons, adjudicator report, per-claim activity timeline (every agent step is logged), email log, manual review actions (approve / reject / request info / escalate / note), inline field editing, and a "resume with reply" box to manually feed in a follow-up email and re-run the pipeline.
+- **New claim** page: paste any free-text claim report and it runs through the same extraction pipeline as an inbound email.
+- **Policies** page: onboard/edit policyholder records (coverage limit, deductible, active window) that the pipeline checks claims against.
+- **Inbox poller**: start/stop background IMAP polling, trigger a poll immediately, see run history. Runs entirely server-side (APScheduler), so it keeps working even with the browser closed.
+- **Query database** page: a locked-down SQL editor (SELECT / WITH only — everything else is rejected before it reaches Postgres) with example queries, a table browser, and CSV export.
+- **Users** page (admin only): create manager/checker/admin accounts, change roles, activate/deactivate.
+
+---
+
+## One-Time Setup
+
+### Supabase project
+
+1. Create a project at [supabase.com](https://supabase.com).
+2. Go to **Project Settings → API** and copy the **Project URL** and the **service_role key** (not the anon key — the backend needs to bypass row-level security to do its job).
+3. Go to **Project Settings → Database → Connection string → URI** and copy it. This becomes `DATABASE_URL` and powers the SQL query tool and automatic schema setup.
+4. Either let the backend apply the schema automatically on first boot (it will, if `DATABASE_URL` is set), or run `backend/app/schema.sql` yourself once in the Supabase SQL editor.
+
+### Backend environment
+
+```bash
+cp backend/.env.example backend/.env
+```
+
+Fill in `SUPABASE_URL`, `SUPABASE_KEY`, `DATABASE_URL`, a `JWT_SECRET`, an `ADMIN_EMAIL` / `ADMIN_PASSWORD` (the bootstrap manager account — change the password after first login), and a `SETTINGS_ENCRYPTION_KEY` (generate with `python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"`).
+
+Everything else in `.env.example` (LLM/Google API key, SMTP, IMAP, thresholds) is **optional** — leave it blank and configure it later from the Settings page in the app, or fill it in now as a fallback. Either way works; whichever is set in the UI always wins.
+
+---
+
+## Run Locally with Docker Compose
+
+```bash
+docker compose up --build
+```
+
+- Backend: http://localhost:8000 (docs at `/docs`)
+- Frontend: http://localhost:8080
+
+Log in with `ADMIN_EMAIL` / `ADMIN_PASSWORD` from `backend/.env`, then create manager/checker accounts under **Users**, and enter your API keys under **Settings** if you didn't put them in `.env`.
+
+---
+
+## Run Locally Without Docker (dev mode)
+
+```bash
+# backend
+cd backend
+python -m venv venv && source venv/bin/activate
+pip install -r requirements.txt
+uvicorn app.main:app --reload
+
+# frontend (separate terminal)
+cd frontend
+cp .env.example .env   # VITE_API_BASE_URL=http://localhost:8000/api
+npm install
+npm run dev
+```
+
+---
+
+## Deploy to Render
+
+This app is live at **[fnol-frontend.onrender.com](https://fnol-frontend.onrender.com)**, deployed exactly this way:
+
+**Option A — Blueprint (recommended):** push this repo to GitHub, then in Render click **New → Blueprint** and point it at the repo. `render.yaml` defines both services. You'll be prompted for the secret env vars (`SUPABASE_URL`, `SUPABASE_KEY`, `DATABASE_URL`, `ADMIN_PASSWORD`, etc).
+
+After the backend's first deploy, copy its public URL (`https://fnol-backend-xxxx.onrender.com`) into the frontend service's `BACKEND_URL` env var, then redeploy the frontend so nginx proxies `/api` to the right place.
+
+**Option B — Manual:** create two **Web Services**, both "Docker" runtime:
+
+- `fnol-backend` → root `backend/`, uses `backend/Dockerfile`. Set the env vars from `backend/.env.example`.
+- `fnol-frontend` → root `frontend/`, uses `frontend/Dockerfile`. Set `BACKEND_URL` to the backend service's public URL.
+
+Both Dockerfiles respect Render's `$PORT` automatically.
 
 ---
 
 ## Project Structure
 
-The system ships as a single production notebook, organized top-to-bottom in execution order:
-
 ```
-FNOL_Claims_Intake_Agent_LangGraph_v3_PRODUCTION.ipynb
-│
-├── Imports + logging
-├── Config                       # eager env-var validation, fails fast on missing creds
-├── Supabase schema (SQL)        # one-time manual setup step
-├── LLM helper                   # single choke point for every model call, with retries
-├── Database layer               # lookup_policy · check_coverage_window · find_prior_claims
-├── Weather cross-check          # Open-Meteo geocoding + historical archive
-├── Shared graph state           # ClaimState (TypedDict)
-├── Agent 1 — Extraction
-├── Completeness gate
-├── Agent 2 — Follow-up drafter
-├── Policy checks node
-├── Agent 3 — Weather-consistency agent
-├── Agent 4 — Suspicious-language / fraud-risk agent
-├── Decision node
-├── Agent 5 — Adjudicator / report writer
-├── Build the graph               # build_graph() → compiled StateGraph
-├── Orchestration helpers         # process_claim · resume_claim · print_review_queue
-├── Structured claim view + manager dashboard
-├── IMAP inbox intake             # fetch_new_claim_emails · process_inbox
-├── Graph visualization           # Mermaid PNG render of the compiled graph
-├── Continuous polling loop       # run_once · run_forever
-└── Deployment notes
+backend/
+  app/
+    main.py              FastAPI app, router wiring, startup (schema + admin bootstrap)
+    config.py             Env bootstrap (Supabase creds, JWT secret) — everything else is a fallback
+    auth.py                JWT auth, password hashing, role guards
+    database.py            Supabase client + direct Postgres pool (for the SQL tool)
+    db_ops.py               Claim/policy CRUD, event logging
+    email_utils.py           SMTP send + IMAP fetch (dynamic settings, test-connection helpers)
+    llm.py                    OpenAI-compatible client wrapper (dynamic settings)
+    weather.py                 Open-Meteo cross-check
+    schema.sql                  Full DB schema (original + app tables)
+    graph/
+      state.py                   Shared LangGraph state
+      nodes.py                    All seven pipeline nodes (same logic as the notebook)
+      graph_builder.py             LangGraph wiring + mermaid export
+      orchestration.py              process_claim / resume_claim / dashboard queries
+    services/
+      settings_service.py          DB-backed settings, encrypted, env-fallback
+      inbox_service.py              IMAP correlation logic (reply matching, relevance filter)
+      poller_service.py              Background polling control (APScheduler)
+    routers/                         One file per API area (auth, claims, dashboard, settings, sql, poller, policies, misc)
+
+frontend/
+  src/
+    api/client.js            Axios instance, JWT header injection, 401 handling
+    context/AuthContext.jsx   Login/logout/current-user state
+    components/               Layout (sidebar nav), StatusBadge
+    pages/                     One file per screen
 ```
-
----
-
-## Getting Started
-
-### Prerequisites
-
-- Python 3.10+
-- A Supabase project (Postgres)
-- An OpenAI-compatible LLM endpoint and API key
-- A mailbox with IMAP and SMTP access (an **app password**, not your login password, if using Gmail)
-
-### 1 — Provision the database
-
-Open **Supabase → SQL Editor → New query** and run the schema from the [Data Model](#data-model) section (full SQL is embedded in the notebook's "Supabase schema" cell). This is the only manual setup step. Load real customers and policies through your own onboarding process — the system does not seed sample data.
-
-### 2 — Install dependencies
-
-```bash
-pip install langgraph openai supabase requests python-dotenv
-```
-
-### 3 — Configure environment variables
-
-Create a `.env` file (or export the variables directly) — see the [Configuration Reference](#configuration-reference) below for the full list.
-
-### 4 — Run
-
-Open the notebook and run all cells top to bottom. The final cell calls `run_forever()`, which polls the configured mailbox continuously.
-
----
-
-## Configuration Reference
-
-Every variable marked **Required** is validated **eagerly at import time** — the notebook raises a `RuntimeError` immediately if any is missing, instead of running with partial or fake behavior.
-
-| Variable | Required | Default | Purpose |
-|---|:---:|---|---|
-| `LLM_API_KEY` | ✅ | — | API key for the LLM endpoint |
-| `LLM_BASE_URL` | | `https://generativelanguage.googleapis.com/v1beta/openai/` | OpenAI-compatible base URL |
-| `LLM_MODEL` | | `gemini-2.0-flash` | Model identifier |
-| `SUPABASE_URL` | ✅ | — | Supabase project URL |
-| `SUPABASE_KEY` | ✅ | — | Supabase `service_role` API key |
-| `SMTP_HOST` | | `smtp.gmail.com` | Outbound mail server |
-| `SMTP_PORT` | | `587` | Outbound mail port |
-| `SMTP_USER` | ✅ | — | SMTP account username |
-| `SMTP_PASSWORD` | ✅ | — | SMTP app password |
-| `IMAP_HOST` | | `imap.gmail.com` | Inbound mail server |
-| `IMAP_PORT` | | `993` | Inbound mail port |
-| `IMAP_USER` | ✅ | — | IMAP account username |
-| `IMAP_PASSWORD` | ✅ | — | IMAP app password |
-| `IMAP_MAILBOX` | | `INBOX` | Mailbox folder to poll |
-| `AUTO_APPROVE_PAYOUT_LIMIT` | | `1500.0` | Payout ceiling for automatic approval |
-| `RISK_SCORE_ESCALATE_THRESHOLD` | | `0.3` | Fraud-language score that forces escalation |
-| `MAX_FOLLOWUP_ATTEMPTS` | | `3` | Automated info-requests before handing off to a human |
-| `POLL_INTERVAL_SECONDS` | | `60` | Inbox polling cadence for `run_forever()` |
-
----
-
-## Running the System
-
-| Function | Purpose |
-|---|---|
-| `process_claim(raw_email_text, claimant_email, damage_estimate, source)` | Runs a single new claim through the graph and persists the result. Auto-generates a `CLM-XXXXXXXX` claim ID. |
-| `resume_claim(claim_id, followup_email_text, damage_estimate)` | Re-enters the graph for an existing claim with the customer's follow-up reply; **updates** the existing row rather than inserting a new one. |
-| `run_once()` | Polls the inbox once, runs every new/replied message through the graph, logs the outcome. |
-| `run_forever(poll_interval)` | Wraps `run_once()` in a loop on a fixed interval. A single failed poll cycle is logged with a full traceback and does **not** crash the process. Exits cleanly on `Ctrl+C` / Kernel Interrupt and prints the final manager dashboard. |
-| `print_review_queue()` | Lists every claim currently `awaiting_info`, `escalate_to_manager`, or `needs_manual_followup`. |
-| `print_claim(claim_id)` | Renders one claim as a formatted card, straight off its Supabase row. |
-| `print_manager_dashboard(detailed=True)` | Full operational snapshot — see below. |
-
-Inbound mail is fetched with `BODY.PEEK[]`, so a message is **never marked read until it has been successfully processed** — a mid-run crash can't silently lose an email. Every unseen message runs through a two-stage filter: it's first checked against open claims for a thread match (by the `[CLM-XXXXXXXX]` tag stamped into every follow-up subject line), and only started as a **new** claim if it actually reads as insurance-related — so a newsletter or unrelated reply never spawns a spurious claim.
-
----
-
-## Manager Dashboard
-
-`print_manager_dashboard()` gives a manager exactly three things to look at:
-
-| Section | Contents |
-|---|---|
-| **Still waiting on the customer** | Claims stuck in the automated info-request loop (`awaiting_info`). |
-| **Escalated to you** | Needs a human decision — includes both risk/coverage escalations and claims that exhausted `MAX_FOLLOWUP_ATTEMPTS` (`escalate_to_manager`, `needs_manual_followup`). |
-| **Auto-approved by the system** | FYI only — no action needed. |
-
-Pass `detailed=True` to expand every row into its full claim card instead of a one-line summary. The dashboard is printed automatically whenever `run_forever()` is interrupted.
 
 ---
 
 ## Duplicate & Supersession Handling
 
-The system never silently merges or silently drops a possible duplicate claim. `find_prior_claims` looks for any other **still-active** claim (`superseded_by IS NULL`) on the same policy number and incident date and returns it — without judgment. `decision_node` then treats a non-empty result as an automatic escalation trigger, naming the prior claim ID(s) explicitly in `decision.reasons`. Once the graph completes, `_persist_result` flips the prior claim's `status` to `superseded` in the database.
+The system never silently merges or silently drops a possible duplicate claim. `find_prior_claims` looks for any other **still-active** claim (`superseded_by IS NULL`) on the same policy number and incident date and returns it — without judgment. `decision_node` then treats a non-empty result as an automatic escalation trigger, naming the prior claim ID(s) explicitly in `decision.reasons`. Once the graph completes, the persistence step flips the prior claim's `status` to `superseded` in the database.
 
-**Both records are preserved.** Only one claim is ever "active" for a given policy + incident date at a time, but the full history stays queryable.
+**Both records are preserved.** Only one claim is ever "active" for a given policy + incident date at a time, but the full history stays queryable in the console.
 
 ---
 
 ## Reliability & Failure Handling
 
-- **Fail-fast configuration** — every required credential is checked at import time; a half-configured deployment never starts.
-- **LLM retries** — `call_llm()` is the single choke point for every model call in the system, with configurable retry attempts and warning-level logging on each failed attempt before it ultimately raises.
+- **Fail-fast configuration** — required backend credentials (`SUPABASE_URL`, `SUPABASE_KEY`, `DATABASE_URL`, `JWT_SECRET`) are checked at startup; a half-configured deployment never boots cleanly.
+- **LLM retries** — `llm.py` is the single choke point for every model call in the system, with configurable retry attempts and warning-level logging on each failed attempt before it ultimately raises.
 - **Crash-safe inbox reads** — unread emails are only marked seen after successful processing.
-- **Isolated poll failures** — `run_forever()` logs a full traceback on a failed cycle and retries on the next interval rather than terminating the process.
-- **Graceful shutdown** — `Ctrl+C` / Kernel Interrupt is caught, the loop exits cleanly, and the final manager dashboard is printed so nothing is left unaccounted for.
+- **Isolated poll failures** — the background poller logs a full traceback on a failed cycle and retries on the next interval rather than crashing the service.
 - **Anti-nagging follow-up loop** — after `MAX_FOLLOWUP_ATTEMPTS` unanswered info requests, the system stops auto-emailing the customer and hands the claim to a human instead.
+- **Full audit trail** — every agent step, decision, and manual review action is logged to the claim's activity timeline in the console.
 
 ---
 
-## Production Deployment Notes
+## Security Notes
 
-1. **Supabase** — create a project, run the schema in the SQL editor, and provide `SUPABASE_URL` / a `service_role` `SUPABASE_KEY`. Load real customers and policies through your own onboarding process.
-2. **LLM** — set `LLM_API_KEY` (and `LLM_BASE_URL` / `LLM_MODEL` if not using the defaults).
-3. **Email sending** — `SMTP_USER` / `SMTP_PASSWORD` (an app password).
-4. **IMAP intake** — `IMAP_USER` / `IMAP_PASSWORD` (app password) and `IMAP_HOST` if not on Gmail.
-5. All of the above are required; the config cell raises immediately if anything is missing.
-6. For a true production rollout, export the notebook to a script with `jupyter nbconvert --to script`, and trigger `run_once()` on a schedule (cron / systemd timer / Airflow) rather than leaving a notebook cell running interactively.
-
----
-
-## Security Considerations
-
-- Keep the Supabase **service key** and every other credential in a secrets manager — never in a plaintext `.env` file in a production environment.
-- IMAP/SMTP credentials should be **app passwords**, scoped and revocable independently of the primary account login.
-- The fraud-language agent is intentionally conservative: it surfaces a **risk score and notes for human review**, and never issues an outright fraud accusation.
-- All decision thresholds (`AUTO_APPROVE_PAYOUT_LIMIT`, `RISK_SCORE_ESCALATE_THRESHOLD`, `MAX_FOLLOWUP_ATTEMPTS`) live in configuration, not code, so they can be tuned per deployment without a redeploy.
+- The SQL query tool only accepts `SELECT`/`WITH` statements, blocks a keyword denylist (INSERT/UPDATE/DELETE/DROP/ALTER/...), rejects multiple statements, wraps every query with a defensive `LIMIT`, and runs it inside a read-only transaction with a 10-second timeout. It's still direct database access — restrict it to manager/admin roles (done by default) and treat it like any other production DB console.
+- Secrets entered on the Settings page (API keys, SMTP/IMAP passwords) are encrypted at rest with Fernet before being stored in `app_settings`. Set `SETTINGS_ENCRYPTION_KEY` explicitly in production so a restart doesn't invalidate them.
+- Change `ADMIN_PASSWORD` immediately after first login.
+- Use an **app password**, not your real mailbox password, for SMTP/IMAP (Gmail: Google Account → Security → App passwords).
+- Keep the Supabase **service key** and every other credential in a secrets manager for any environment beyond a quick demo deploy.
 
 ---
 
-<p align="center"><sub>Built on LangGraph · Supabase · IMAP/SMTP · Open-Meteo</sub></p>
+<p align="center"><sub>Built on LangGraph · FastAPI · React · Supabase · Render</sub></p>

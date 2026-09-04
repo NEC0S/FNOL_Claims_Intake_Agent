@@ -1,4 +1,4 @@
-# FNOL Claims Intake — Operations Console
+# FNOL Claims Intake
 
 **A production multi-agent LangGraph pipeline for automated auto-insurance claim intake, triage, and adjudication — wrapped in a full-stack FastAPI + React operations console.**
 
@@ -12,9 +12,15 @@
 [![License](https://img.shields.io/badge/license-Proprietary-lightgrey)]()
 
 🔗 **Live app:** [fnol-frontend.onrender.com](https://fnol-frontend.onrender.com)
-🎥 **Demo video:** _coming soon_
 
 ---
+## 🎥 **Demo video:**
+
+https://github.com/user-attachments/assets/5a7c71fd-d49d-46ba-aaeb-d278c5af760a
+
+
+---
+
 
 ## Overview
 
